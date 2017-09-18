@@ -1,0 +1,446 @@
+-----------weidian dashboard 
+-- developer :Junhua Dong
+-- Date：2017-08-29
+-- Commment：Data reports uv／pv and transaction data of weidian
+--*******************************************************--
+
+USE hzdi;
+set hive.exec.parallel=true;   
+set hive.merge.mapfiles = true;
+set hive.auto.convert.join=true;
+set hive.optimize.correlation=true;
+set hive.merge.mapredfiles = true;  
+set hive.exec.parallel.thread.number=4;
+set hive.merge.size.per.task = 256000000;  
+set hive.merge.smallfiles.avgsize=64000000; 
+set hive.security.authorization.enabled=false;
+set mapreduce.map.failures.maxpercent=50;
+set hive.exec.mode.local.auto.input.files.max=8;
+set hive.exec.mode.local.auto.inputbytes.max=250000000;
+set Hive.optimize.skewjoin = true;
+
+create  table  IF NOT EXISTS hzdi.rpt_wdbuyer_city_di
+(  
+	day 					string		comment		'日期'
+	,city 					string		comment		'小镇'
+	,city_vms_id 			string		comment		'小镇vms_id'
+	,city_view_uv			bigint		comment		'街道浏览uv'
+	,city_view_pv			bigint		comment		'街道浏览pv'
+	,city_click_uv			bigint		comment		'街道点击uv'
+	,city_click_pv			bigint		comment		'街道点击pv'
+	,shopcart_uv			bigint		comment		'引导加购'
+	,h5page_collect_uv		bigint		comment		'引导h5页面收藏'					
+	,shop_collect_uv		bigint		comment		'引导进店后收藏'	
+	,buyer_amount			bigint		comment		'引导购买人数'
+	,order_amount			bigint		comment		'引导订单数'
+	,pay_amount				bigint		comment		'引导购买金额'
+)	comment 'vms页面每日浏览vms_id中间表'
+PARTITIONED by (pt string  comment   '按天分区日期' )
+;
+
+
+with z0 as
+(
+		select	pt
+				,buyer_id
+				,idvisitor
+				,request_time
+				,seller_id
+				,status
+				,'city' as dim
+				,city_vms_id
+				,city
+		from
+		(
+				select 	buyer_id
+						,vms_id	
+						,idvisitor
+						,request_time
+						,seller_id
+						,status
+						,pt
+				from 	hzdi.edw_h5_vmsid_di
+				where	pt = '${bizday}'
+		)	xx1
+
+		join
+
+		(
+				select	split(clink,'/')[4] as city_vms_id
+						,city
+				from	hzdi.ods_wdbuyer_city_mapping
+				where 	clink regexp 'https://vmspub\\.weidian\\.com/gaia/[0-9]*/[a-z0-9A-Z]*\\.html'
+		)	xx2
+		on 	xx1.vms_id = xx2.city_vms_id
+
+		union
+
+		select	pt
+				,buyer_id
+				,idvisitor
+				,request_time
+				,seller_id
+				,status
+				,'street' as dim
+				,city_vms_id
+				,city
+		from
+		(
+				select 	buyer_id
+						,vms_id	
+						,idvisitor
+						,request_time
+						,seller_id
+						,status
+						,pt
+				from 	hzdi.edw_h5_vmsid_di
+				where	pt = '${bizday}'
+		)	yy1
+
+		join
+
+		(
+				select	split(clink,'/')[4] as city_vms_id
+						,city
+						,split(slink,'/')[4] as street_vms_id
+				from	hzdi.ods_wdbuyer_city_mapping
+				where 	slink regexp 'https://vmspub\\.weidian\\.com/gaia/[0-9]*/[a-z0-9A-Z]*\\.html'
+		)	yy2
+		on 	yy1.vms_id = yy2.street_vms_id
+)
+
+INSERT OVERWRITE TABLE hzdi.rpt_wdbuyer_city_di PARTITION( pt ='${bizday}') 
+
+select	pt
+		,city
+		,a1.city_vms_id
+		,city_view_uv
+		,city_view_pv
+		,b1.city_click_uv
+		,b1.city_click_pv
+		,c1.shopcart_uv
+		,a1.h5page_collect_uv	--h5 add favorite
+		,d1.shop_collect_uv		
+		,e1.buyer_amount
+		,e1.order_amount
+		,e1.pay_amount
+from
+(
+		select	
+				pt
+				
+				,count(distinct idvisitor) as city_view_uv
+				,count(distinct concat(request_time,idvisitor)) as city_view_pv
+				,count(distinct case when status in ('1','2') then buyer_id end) as h5page_collect_uv
+		from	z0
+		group by pt
+)	a1
+
+left outer join
+
+(
+		select	pt
+				,count(distinct suid) as city_click_uv  
+				,count(distinct concat(suid,local_timestamp)) as city_click_pv
+		from
+
+		(
+				select	pt
+						,suid
+						,local_timestamp
+				from
+				(
+						select	pt
+						        ,split(clink,'/')[4] as city_vms_id
+								,split(slink,'/')[4] as street_vms_id
+						from	hzdi.ods_wdbuyer_city_mapping
+				)	bbb1
+				join
+				(
+						select 	pt
+						        ,split(page,'/')[4] as page_vms_id
+								,suid
+								,local_timestamp
+						from 	hzdi.ods_windtrack_wdbuyer_di
+						where 	pt = '${bizday}'
+								and page regexp 'https://vmspub\\.weidian\\.com/gaia/[0-9]*/[a-z0-9A-Z]*\\.html'
+								and event_id = '2001'
+								and app_key in ('pn3r5fxxqw0xbeccfh','z8ueleujnfzzrkxsqd')
+				)	bbb2
+				on 	bbb1.pt = bbb2.pt 
+
+				union
+
+				select	pt
+						,suid
+						,local_timestamp
+				from
+				(
+						select	pt
+						        ,split(clink,'/')[4] as city_vms_id
+								,split(slink,'/')[4] as street_vms_id
+						from	hzdi.ods_wdbuyer_city_mapping
+				)	bbb1
+				join
+				(
+						select 	pt
+						        ,split(page,'/')[4] as page_vms_id
+								,suid
+								,local_timestamp
+						from 	hzdi.ods_windtrack_wdbuyer_di
+						where 	pt = '${bizday}'
+								and page regexp 'https://vmspub\\.weidian\\.com/gaia/[0-9]*/[a-z0-9A-Z]*\\.html'
+								and event_id = '2001'
+								and app_key in ('pn3r5fxxqw0xbeccfh','z8ueleujnfzzrkxsqd')
+				)	bbb2
+				on 	bbb1.pt = bbb2.pt
+		)	bb1
+		group by pt
+)	b1
+on 	a1.city_vms_id = b1.city_vms_id
+
+left outer join
+
+(	--add_cart uv
+		select	pt
+		,count(distinct ccc1.buyer_id) as shopcart_uv
+				
+		from
+		(
+				select 	pt
+				        ,buyer_id
+						
+						,seller_id
+				from	z0
+				where	status in ('1','3')
+						and buyer_id is not null
+		)	ccc1
+		
+		join
+
+		(
+				select 	pt,buyer_id
+						,seller_id
+				from	hzdi.dwd_add_shopping_cart_di
+				where 	pt = '${bizday}'
+						and type = '1' --1 add_cart，o else
+		)	ccc2
+		on 	ccc1.buyer_id = ccc2.buyer_id and ccc1.seller_id = ccc2.seller_id
+		
+)	c1
+on 	a1.pt= c1.pt
+
+left outer join
+
+(	--uv，native part
+		select	pt,count(distinct ddd1.buyer_id) as shop_collect_uv
+				
+		from
+		(
+				select 	buyer_id
+						,city_vms_id
+						,seller_id
+				from	z0
+				where	status in ('3')
+						and buyer_id is not null
+		)	ddd1
+		
+		join
+
+		(
+				select 	user_id as buyer_id
+						,shop_id as seller_id
+				from	di.stg_prod_shop_collect_relation
+				where 	day = '${bizday}'
+		)	ddd2
+		on 	ddd1.buyer_id = ddd2.buyer_id and ddd1.seller_id = ddd2.seller_id
+		group by pt
+)	d1
+on 	a1.pt = d1.pt
+
+left outer join
+
+(	
+		select	pt,count(distinct buyer_id) as buyer_amount
+				,count(distinct order_no) as order_amount
+				,sum(item_pay_amount) as pay_amount
+				
+		from
+		(
+				select 	order_no
+						,item_pay_amount
+						,eee2.buyer_id
+						
+				from
+				(
+						select 	buyer_id
+								
+								,seller_id
+						from	z0
+						where	status in ('1','3')
+								and buyer_id is not null
+				)	eee1
+				
+				join
+
+				(
+						select 	buyer_id
+								,seller_id
+								,order_no
+								,item_pay_amount
+						from	hzdi.dwd_order_item_info_di
+						where 	pt = '${bizday}'
+								and is_cheat_order=0    
+								and is_spam_faked_sale=0    
+								and order_pay_amount<100000    
+								and split(extend,',')[19] regexp 'WDBuyer'
+								and is_pay = 1
+								and pay_time<>'0000-00-00 00:00:00'
+				)	eee2
+				on 	eee1.buyer_id = eee2.buyer_id and eee1.seller_id = eee2.seller_id
+				group by order_no,item_pay_amount,eee2.buyer_id
+		)	eee0
+		group by pt
+)	e1
+on 	a1.pt = e1.pt
+
+
+
+
+----------------- tempory table for support
+-- developer：Junhua Dong
+-- date：2017-08-28
+-- comment：vms_id in h5 browse log 
+--*******************************************************--
+
+USE hzdi;
+set hive.exec.parallel=true;   
+set hive.merge.mapfiles = true;
+set hive.auto.convert.join=true;
+set hive.optimize.correlation=true;
+set hive.merge.mapredfiles = true;  
+set hive.exec.parallel.thread.number=4;
+set hive.merge.size.per.task = 256000000;  
+set hive.merge.smallfiles.avgsize=64000000; 
+set hive.security.authorization.enabled=false;
+set mapreduce.map.failures.maxpercent=50;
+set hive.exec.mode.local.auto.input.files.max=8;
+set hive.exec.mode.local.auto.inputbytes.max=250000000;
+set Hive.optimize.skewjoin = true;
+
+create  table  IF NOT EXISTS hzdi.edw_h5_vmsid_di
+(  
+	buyer_id			string		comment		'浏览vms页面的所有buyer'
+	,vms_id				string		comment		'vms页面id'
+	,idvisitor			string		comment		'浏览vms页面的所有idvisitor'
+	,request_time		string		comment		'浏览请求时间，用于计算pv'
+	,seller_id			string		comment		'seller_id'
+	,status				string		comment		'1=收藏+进店／2=收藏未进店／3=进店未收藏／4=未收藏未进店'
+)	comment 'vms页面每日浏览vms_id中间表'
+PARTITIONED by (pt string  comment   '按天分区日期' )
+;
+
+INSERT OVERWRITE TABLE hzdi.edw_h5_vmsid_di PARTITION( pt ='${bizday}')  
+
+select	qqq1.buyer_id
+		,qqq1.vms_id
+		,qqq1.idvisitor
+		,qqq1.request_time
+		,case when qqq1.seller_id = qqq2.seller_id then qqq1.seller_id
+			when qqq1.seller_id is null and qqq2.seller_id is not null then qqq2.seller_id
+			when qqq1.seller_id is not null and qqq2.seller_id is null then qqq1.seller_id
+			when qqq1.seller_id is null and qqq2.seller_id is null then 'none_seller_id'
+			end as seller_id
+		,case when qqq1.seller_id = qqq2.seller_id then '1'
+			when qqq1.seller_id is null and qqq2.seller_id is not null then '2'
+			when qqq1.seller_id is not null and qqq2.seller_id is null then '3'
+			when qqq1.seller_id is null and qqq2.seller_id is null then '4'
+			end as status
+from	
+(
+		select	a1.buyer_id
+				,a1.vms_id
+				,a1.idvisitor
+				,request_time
+				,b1.seller_id
+				,case when b1.jindian = '1' then '1' else '0' end as shop_status
+		from
+		(
+				select 	split(url,'/')[4] as vms_id
+						,buyer_id		
+						,idvisitor		
+						,pt
+						,request_time
+				from 	hzdi.ods_h5_log_page_view_di
+				where 	pt = '${bizday}'
+						and url regexp 'https://vmspub\\.weidian\\.com/gaia/[0-9]*/[a-z0-9A-Z]*\\.html'
+		)	a1
+
+		left outer join
+
+		(	--b1
+				select 	buyer_id
+						,split(args['referrer'],'/')[4] as vms_id
+						,args['shopId'] as seller_id
+						,'1' as jindian
+						,day
+				from	di.stg_windtrack_meta
+				where	day = '${bizday}'
+						and event_id = '2001'
+						and app_key in ('pn3r5fxxqw0xbeccfh','z8ueleujnfzzrkxsqd')
+						and page in ('shop','item')
+						and args['referrer'] regexp 'https://vmspub\\.weidian\\.com/gaia/[0-9]*/[a-z0-9A-Z]*\\.html'
+						and length(trim(buyer_id)) > 0
+						and buyer_id is not null
+		)	b1
+		on 	a1.vms_id = b1.vms_id and a1.buyer_id = b1.buyer_id and a1.pt = b1.day
+)	qqq1
+
+left outer join
+
+(	--
+		select	buyer_id
+				,split(curr_url,'/')[4] as vms_id
+				,idvisitor
+				,get_json_object(click_act_args,'$.shopId') as seller_id		--get_json_object，json{"itemId":"1164003290"}
+				,'1' as collect_status
+		from 	hzdi.ods_h5_log_click_di
+		where	pt = '${bizday}'
+				and curr_url regexp 'https://vmspub\\.weidian\\.com/gaia/[0-9]*/[a-z0-9A-Z]*\\.html'
+				and click_act_type = '_addToFavorites'		
+				and buyer_id is not null
+				and buyer_id != '-1'
+				and length(trim(buyer_id)) > 0
+)	qqq2
+on	qqq1.vms_id = qqq2.vms_id and qqq1.buyer_id = qqq2.buyer_id and qqq1.idvisitor = qqq2.idvisitor
+where	(
+			(qqq1.seller_id = qqq2.seller_id) or (qqq1.seller_id is null) or (qqq2.seller_id is null) 
+		)
+group by qqq1.buyer_id
+		,qqq1.vms_id
+		,qqq1.idvisitor
+		,qqq1.request_time
+		,case when qqq1.seller_id = qqq2.seller_id then qqq1.seller_id
+			when qqq1.seller_id is null and qqq2.seller_id is not null then qqq2.seller_id
+			when qqq1.seller_id is not null and qqq2.seller_id is null then qqq1.seller_id
+			when qqq1.seller_id is null and qqq2.seller_id is null then 'none_seller_id'
+			end
+		,case when qqq1.seller_id = qqq2.seller_id then '1'
+			when qqq1.seller_id is null and qqq2.seller_id is not null then '2'
+			when qqq1.seller_id is not null and qqq2.seller_id is null then '3'
+			when qqq1.seller_id is null and qqq2.seller_id is null then '4'
+			end
+
+
+
+
+
+
+
+
+
+
+
+
+
+
